@@ -153,23 +153,22 @@ fn run_command_capture(
 fn run_pid_capture(
     pids: &[i32],
     event_groups: &[Vec<EventConfig>],
-    cores: &[i32],
+    _cores: &[i32],
     interval: Option<u64>,
 ) -> Result<CaptureResult> {
-    // Verify PIDs exist
+    // Open one PerfCollector per PID. Use core=-1 so the kernel follows
+    // each process across all cores automatically.
+    let pid_cores: &[i32] = &[-1];
+    let mut collectors: Vec<PerfCollector> = Vec::with_capacity(pids.len());
     for &pid in pids {
-        let proc_path = format!("/proc/{pid}");
-        if !std::path::Path::new(&proc_path).exists() {
-            bail!("PID {pid} does not exist");
-        }
+        let collector = PerfCollector::open(event_groups, pid_cores, Some(pid))
+            .with_context(|| format!("Failed to open perf events for PID {pid}"))?;
+        collectors.push(collector);
     }
 
-    // Open perf events targeting the first PID (or system-wide with core filter)
-    // For PID mode, we open per-pid events
-    let collector = PerfCollector::open(event_groups, cores, Some(pids[0]))?;
-
-    // Enable counters
-    collector.enable()?;
+    for c in &collectors {
+        c.enable()?;
+    }
 
     if let Some(interval_ms) = interval {
         let interval_dur = Duration::from_millis(interval_ms);
@@ -180,23 +179,51 @@ fn run_pid_capture(
         while !remaining.is_empty() {
             std::thread::sleep(interval_dur);
 
-            let results = collector.read_and_reset()?;
-            let elapsed = start.elapsed().as_secs_f64();
+            let mut merged = HashMap::new();
+            for c in &collectors {
+                merge_results(&mut merged, &c.read_and_reset()?);
+            }
             snapshots.push(TimestampedSnapshot {
-                timestamp: elapsed,
-                results,
+                timestamp: start.elapsed().as_secs_f64(),
+                results: merged,
             });
 
             remaining.retain(|&pid| std::path::Path::new(&format!("/proc/{pid}")).exists());
         }
 
-        collector.disable()?;
+        for c in &collectors {
+            c.disable()?;
+        }
         Ok(CaptureResult::Intervals(snapshots))
     } else {
-        // Wait for PIDs to exit using polling on /proc/[pid]
         wait_for_pids(pids)?;
-        collector.disable()?;
-        Ok(CaptureResult::Aggregated(collector.read_results()?))
+        for c in &collectors {
+            c.disable()?;
+        }
+        let mut merged = HashMap::new();
+        for c in &collectors {
+            merge_results(&mut merged, &c.read_results()?);
+        }
+        Ok(CaptureResult::Aggregated(merged))
+    }
+}
+
+/// Merge per-PID results by summing values for matching event groups.
+fn merge_results(
+    dest: &mut HashMap<Vec<String>, Vec<Option<f64>>>,
+    src: &HashMap<Vec<String>, Vec<Option<f64>>>,
+) {
+    for (key, src_vals) in src {
+        let dest_vals = dest
+            .entry(key.clone())
+            .or_insert_with(|| vec![None; src_vals.len()]);
+        for (i, src_val) in src_vals.iter().enumerate() {
+            if let Some(sv) = src_val {
+                if i < dest_vals.len() {
+                    dest_vals[i] = Some(dest_vals[i].unwrap_or(0.0) + sv);
+                }
+            }
+        }
     }
 }
 

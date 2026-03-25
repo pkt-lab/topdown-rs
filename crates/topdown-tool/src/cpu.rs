@@ -275,8 +275,10 @@ pub fn compute_metrics(
     for (names, values) in event_results {
         for (name, val) in names.iter().zip(values.iter()) {
             if let Some(v) = val {
-                // Accumulate if same event appears in multiple groups
-                *event_values.entry(name.clone()).or_insert(0.0) += v;
+                // Use last seen value — counters are already aggregated across
+                // cores, so accumulating causes double-counting when the same
+                // event appears in multiple scheduler groups.
+                event_values.insert(name.clone(), *v);
             }
         }
     }

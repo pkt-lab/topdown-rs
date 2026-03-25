@@ -233,7 +233,6 @@ fn main() -> Result<()> {
         if cli.dump_events {
             output::dump_interval_events(
                 &all_interval_snapshots,
-                &db,
                 cli.csv_output.as_deref(),
             )?;
         } else {
@@ -244,7 +243,6 @@ fn main() -> Result<()> {
             )?;
             output::render_interval_metrics(
                 &computed,
-                &db,
                 cli.csv_output.as_deref(),
             )?;
         }

@@ -319,20 +319,28 @@ impl PerfCollector {
         Ok(results)
     }
 
-    /// Read current counter values and then reset counters to zero.
-    /// Returns delta values accumulated since the last read/reset.
+    /// Read counter values and immediately reset each group.
+    /// Minimizes the gap between read and reset to reduce lost events.
     pub fn read_and_reset(&self) -> Result<HashMap<Vec<String>, Vec<Option<f64>>>> {
-        let results = self.read_results()?;
-        self.reset()?;
-        Ok(results)
-    }
+        let mut results = HashMap::new();
 
-    /// Reset all group counters to zero.
-    pub fn reset(&self) -> Result<()> {
-        for g in &self.groups {
-            reset_group(g)?;
+        for (eg_idx, names) in self.event_names.iter().enumerate() {
+            let n = names.len();
+            let mut aggregated = vec![0.0f64; n];
+            let mut valid = vec![true; n];
+
+            for core_idx in 0..self.cores_count {
+                let pg = &self.groups[eg_idx * self.cores_count + core_idx];
+                let values = read_group_values(pg)?;
+                // Reset immediately after reading this group to minimize lost events
+                reset_group(pg)?;
+                aggregate_values(&mut aggregated, &mut valid, &values);
+            }
+
+            results.insert(names.clone(), finalize_values(&aggregated, &valid));
         }
-        Ok(())
+
+        Ok(results)
     }
 }
 
