@@ -1,0 +1,37 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2022-2025 Arm Limited (original Python implementation)
+# Copyright 2026 pkt-lab contributors (Rust reimplementation)
+
+[workspace]
+resolver = "2"
+members = [
+    "crates/telemetry-core",
+    "crates/topdown-tool",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/pkt-lab/topdown-rs"
+
+[workspace.dependencies]
+telemetry-core = { path = "crates/telemetry-core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+comfy-table = "7"
+csv = "1"
+libc = "0.2"
+nix = { version = "0.29", features = ["signal", "process", "fs", "event"] }
+log = "0.4"
+env_logger = "0.11"
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true
+codegen-units = 1
+panic = "abort"

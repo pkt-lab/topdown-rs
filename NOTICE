@@ -1,0 +1,25 @@
+topdown-rs
+Copyright 2026 pkt-lab contributors
+
+This project is a Rust reimplementation of the topdown_tool component from the
+Arm Telemetry Solution project, and constitutes a Derivative Work under the
+Apache License, Version 2.0.
+
+Original Work:
+  Project: Arm Telemetry Solution
+  URL: https://gitlab.arm.com/telemetry-solution/telemetry-solution
+  Component: tools/topdown_tool
+  Copyright: 2022-2025 Arm Limited
+  License: Apache-2.0
+  Authors: Vincent Coubard <vincent.coubard@arm.com>,
+           Adam Zenker <adam.zenker@arm.com>
+
+The JSON telemetry specification files under data/ are derived from the original
+Arm Telemetry Solution data/ directory and are Copyright 2022-2025 Arm Limited,
+licensed under Apache-2.0.
+
+This Derivative Work contains significant modifications:
+  - Complete reimplementation from Python to Rust
+  - Direct perf_event_open syscall interface (no perf binary dependency)
+  - Direct inotify syscall interface (no inotifywait binary dependency)
+  - Static binary compilation for embedded Linux, Android, and Yocto targets

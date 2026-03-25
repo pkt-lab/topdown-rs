@@ -1,0 +1,15 @@
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "telemetry-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Core library for Arm topdown performance analysis — JSON spec loading, formula evaluation, event scheduling"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+log = { workspace = true }
