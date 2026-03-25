@@ -1,0 +1,59 @@
+{
+    "0x41d0c": {
+        "name": "neoverse_n1_r4p1_pmu"
+    },
+    "0x41d49": {
+        "name": "neoverse_n2_r0p2_pmu"
+    },
+    "0x410fd493": {
+        "name": "neoverse_n2_r0p3_pmu"
+    },
+    "0x6dd49": {
+        "name": "neoverse_n2_r0p2_pmu"
+    },
+    "0x6d0fd493": {
+        "name": "neoverse_n2_r0p3_pmu"
+    },
+    "0x41d8e": {
+        "name": "neoverse_n3_r0p0_pmu"
+    },
+    "0x41d40": {
+        "name": "neoverse_v1_r1p2_pmu"
+    },
+    "0x41d4f": {
+        "name": "neoverse_v2_r0p0_pmu"
+    },
+    "0x41d84": {
+        "name": "neoverse_v3_r0p0_pmu"
+    },
+    "0x410fd8a0": {
+        "name": "arm_c1_nano_r0p0_pmu"
+    },
+    "0x41d8a": {
+        "name": "arm_c1_nano_r0p0_pmu"
+    },
+    "0x410fd900": {
+        "name": "arm_c1_premium_r0p0_pmu"
+    },
+    "0x41d90": {
+        "name": "arm_c1_premium_r0p0_pmu"
+    },
+    "0x410fd8b0": {
+        "name": "arm_c1_pro_r0p0_pmu"
+    },
+    "0x411fd8b1": {
+        "name": "arm_c1_pro_r1p1_pmu"
+    },
+    "0x411fd8b2": {
+        "name": "arm_c1_pro_r1p2_pmu"
+    },
+    "0x41d8b": {
+        "name": "arm_c1_pro_r1p2_pmu"
+    },
+    "0x410fd8c0": {
+        "name": "arm_c1_ultra_r0p0_pmu"
+    },
+    "0x41d8c": {
+        "name": "arm_c1_ultra_r0p0_pmu"
+    }
+}
