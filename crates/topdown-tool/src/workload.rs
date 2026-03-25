@@ -90,7 +90,7 @@ fn run_command_capture(
 fn run_pid_capture(
     pids: &[i32],
     event_groups: &[Vec<EventConfig>],
-    cores: &[i32],
+    _cores: &[i32],
 ) -> Result<HashMap<Vec<String>, Vec<Option<f64>>>> {
     // Verify PIDs exist
     for &pid in pids {
@@ -100,20 +100,52 @@ fn run_pid_capture(
         }
     }
 
-    // Open perf events targeting the first PID (or system-wide with core filter)
-    // For PID mode, we open per-pid events
-    let collector = PerfCollector::open(event_groups, cores, Some(pids[0]))?;
+    // Open one PerfCollector per PID. In PID mode we use core = -1 so the
+    // kernel follows the process across all cores automatically.
+    let pid_cores: &[i32] = &[-1];
+    let mut collectors: Vec<PerfCollector> = Vec::with_capacity(pids.len());
+    for &pid in pids {
+        let collector = PerfCollector::open(event_groups, pid_cores, Some(pid))
+            .with_context(|| format!("Failed to open perf events for PID {pid}"))?;
+        collectors.push(collector);
+    }
 
-    // Enable counters
-    collector.enable()?;
+    // Enable counters for all PIDs
+    for collector in &collectors {
+        collector.enable()?;
+    }
 
-    // Wait for PIDs to exit using inotify on /proc/[pid]
+    // Wait for all PIDs to exit
     wait_for_pids(pids)?;
 
-    // Disable counters
-    collector.disable()?;
+    // Disable counters for all PIDs
+    for collector in &collectors {
+        collector.disable()?;
+    }
 
-    collector.read_results()
+    // Read and merge results across all PIDs
+    let mut merged: HashMap<Vec<String>, Vec<Option<f64>>> = HashMap::new();
+    for collector in &collectors {
+        let results = collector.read_results()?;
+        merge_results(&mut merged, &results);
+    }
+
+    Ok(merged)
+}
+
+/// Merge per-PID results by summing values for matching event groups.
+fn merge_results(
+    dest: &mut HashMap<Vec<String>, Vec<Option<f64>>>,
+    src: &HashMap<Vec<String>, Vec<Option<f64>>>,
+) {
+    for (key, src_vals) in src {
+        let dest_vals = dest.entry(key.clone()).or_insert_with(|| vec![None; src_vals.len()]);
+        for (i, src_val) in src_vals.iter().enumerate() {
+            if let Some(sv) = src_val {
+                dest_vals[i] = Some(dest_vals[i].unwrap_or(0.0) + sv);
+            }
+        }
+    }
 }
 
 /// Wait for PIDs to exit by polling /proc/[pid].
