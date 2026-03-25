@@ -236,6 +236,34 @@ pub struct ComputedGroup {
     pub metrics: Vec<ComputedMetric>,
 }
 
+/// A timestamped set of computed metric groups.
+#[derive(Debug, Clone)]
+pub struct TimestampedComputedGroups {
+    /// Seconds elapsed since capture start.
+    pub timestamp: f64,
+    /// Computed metric groups for this interval.
+    pub groups: Vec<ComputedGroup>,
+}
+
+/// Compute metrics for each timestamped snapshot.
+pub fn compute_metrics_per_timestamp(
+    db: &TelemetryDatabase,
+    capture_groups: &[GroupLike],
+    snapshots: &[crate::workload::TimestampedSnapshot],
+) -> Result<Vec<TimestampedComputedGroups>> {
+    let mut result = Vec::with_capacity(snapshots.len());
+
+    for snapshot in snapshots {
+        let groups = compute_metrics(db, capture_groups, &snapshot.results)?;
+        result.push(TimestampedComputedGroups {
+            timestamp: snapshot.timestamp,
+            groups,
+        });
+    }
+
+    Ok(result)
+}
+
 /// Compute metrics from raw event results.
 pub fn compute_metrics(
     db: &TelemetryDatabase,

@@ -3,7 +3,8 @@
 
 //! CLI and CSV output rendering for topdown metrics.
 
-use crate::cpu::ComputedGroup;
+use crate::cpu::{ComputedGroup, TimestampedComputedGroups};
+use crate::workload::TimestampedSnapshot;
 use anyhow::Result;
 use comfy_table::{modifiers::UTF8_ROUND_CORNERS, presets::UTF8_FULL, Attribute, Cell, Color, Table};
 use std::collections::HashMap;
@@ -213,6 +214,197 @@ fn write_metrics_csv(computed: &[ComputedGroup], dir: &Path) -> Result<()> {
 
     wtr.flush()?;
     println!("\nCSV written to: {}", path.display());
+    Ok(())
+}
+
+// ─── Interval metric rendering ───────────────────────────────────────────────
+
+/// Render interval (time-series) metrics to the terminal and optionally to CSV.
+pub fn render_interval_metrics(
+    intervals: &[TimestampedComputedGroups],
+    _db: &TelemetryDatabase,
+    csv_path: Option<&Path>,
+) -> Result<()> {
+    if intervals.is_empty() {
+        println!("No interval data collected.");
+        return Ok(());
+    }
+
+    render_interval_metrics_terminal(intervals);
+
+    if let Some(dir) = csv_path {
+        write_interval_metrics_csv(intervals, dir)?;
+    }
+
+    Ok(())
+}
+
+fn render_interval_metrics_terminal(intervals: &[TimestampedComputedGroups]) {
+    // Use the first interval's groups as the template for column ordering
+    let first = &intervals[0];
+
+    for (group_idx, group) in first.groups.iter().enumerate() {
+        println!();
+        let stage_label = if group.stage == 1 { "Stage 1" } else { "Stage 2" };
+        println!("── {} ({}) ──", group.group_title, stage_label);
+
+        // Build header: Timestamp + each metric name
+        let mut header = vec![Cell::new("Timestamp (s)")];
+        for cm in &group.metrics {
+            let unit_str = adjust_unit(&cm.units);
+            header.push(Cell::new(format!("{} ({})", cm.metric_name, unit_str)));
+        }
+
+        let mut table = new_table();
+        table.set_header(header);
+
+        for ts_group in intervals {
+            if group_idx >= ts_group.groups.len() {
+                continue;
+            }
+            let g = &ts_group.groups[group_idx];
+            let mut row = vec![Cell::new(format!("{:.3}", ts_group.timestamp))];
+
+            for cm in &g.metrics {
+                let value_str = format_value(cm.value, &cm.units);
+                let is_pct = is_percent(&cm.units);
+
+                let cell = match cm.value {
+                    Some(v) if is_pct && v > 50.0 => {
+                        Cell::new(&value_str)
+                            .fg(Color::Red)
+                            .add_attribute(Attribute::Bold)
+                    }
+                    Some(_) => Cell::new(&value_str),
+                    None => Cell::new(&value_str).fg(Color::DarkGrey),
+                };
+                row.push(cell);
+            }
+
+            table.add_row(row);
+        }
+
+        println!("{table}");
+    }
+}
+
+fn write_interval_metrics_csv(
+    intervals: &[TimestampedComputedGroups],
+    dir: &Path,
+) -> Result<()> {
+    std::fs::create_dir_all(dir)?;
+    let path = dir.join("metrics_interval.csv");
+    let mut wtr = csv::Writer::from_path(&path)?;
+    wtr.write_record(["timestamp", "group", "stage", "metric", "value", "units"])?;
+
+    for ts_group in intervals {
+        let ts_str = format!("{:.3}", ts_group.timestamp);
+        for group in &ts_group.groups {
+            let stage_str = group.stage.to_string();
+            for cm in &group.metrics {
+                wtr.write_record([
+                    &ts_str,
+                    &group.group_name,
+                    &stage_str,
+                    &cm.metric_name,
+                    &format_csv_value(cm.value),
+                    &cm.units,
+                ])?;
+            }
+        }
+    }
+
+    wtr.flush()?;
+    println!("\nCSV written to: {}", path.display());
+    Ok(())
+}
+
+/// Dump raw event values per interval.
+pub fn dump_interval_events(
+    snapshots: &[TimestampedSnapshot],
+    db: &TelemetryDatabase,
+    csv_path: Option<&Path>,
+) -> Result<()> {
+    if snapshots.is_empty() {
+        println!("No interval data collected.");
+        return Ok(());
+    }
+
+    // Collect all event names in stable order from the first snapshot
+    let first = &snapshots[0];
+    let mut event_info: Vec<(&str, u64)> = Vec::new();
+    for (names, _) in &first.results {
+        for name in names {
+            let code = db.events.get(name).map(|e| e.code).unwrap_or(0);
+            event_info.push((name, code));
+        }
+    }
+    event_info.sort_by_key(|(name, _)| *name);
+
+    // Build header
+    let mut header = vec![Cell::new("Timestamp (s)")];
+    for (name, _) in &event_info {
+        header.push(Cell::new(*name));
+    }
+
+    let mut table = new_table();
+    table.set_header(header);
+
+    for snapshot in snapshots {
+        let mut event_values: HashMap<&str, Option<f64>> = HashMap::new();
+        for (names, values) in &snapshot.results {
+            for (name, val) in names.iter().zip(values.iter()) {
+                event_values.insert(name, *val);
+            }
+        }
+
+        let mut row = vec![Cell::new(format!("{:.3}", snapshot.timestamp))];
+        for (name, _) in &event_info {
+            let val_str = match event_values.get(name) {
+                Some(Some(v)) => format!("{v:.0}"),
+                _ => "n/a".to_string(),
+            };
+            row.push(Cell::new(val_str));
+        }
+        table.add_row(row);
+    }
+
+    println!("{table}");
+
+    if let Some(dir) = csv_path {
+        std::fs::create_dir_all(dir)?;
+        let path = dir.join("events_interval.csv");
+        let mut wtr = csv::Writer::from_path(&path)?;
+
+        let mut csv_header = vec!["timestamp".to_string()];
+        for (name, _) in &event_info {
+            csv_header.push(name.to_string());
+        }
+        wtr.write_record(&csv_header)?;
+
+        for snapshot in snapshots {
+            let mut event_values: HashMap<&str, Option<f64>> = HashMap::new();
+            for (names, values) in &snapshot.results {
+                for (name, val) in names.iter().zip(values.iter()) {
+                    event_values.insert(name, *val);
+                }
+            }
+
+            let mut record = vec![format!("{:.3}", snapshot.timestamp)];
+            for (name, _) in &event_info {
+                let val_str = match event_values.get(name) {
+                    Some(Some(v)) => format!("{v}"),
+                    _ => String::new(),
+                };
+                record.push(val_str);
+            }
+            wtr.write_record(&record)?;
+        }
+
+        wtr.flush()?;
+        println!("\nCSV written to: {}", path.display());
+    }
+
     Ok(())
 }
 

@@ -318,6 +318,22 @@ impl PerfCollector {
 
         Ok(results)
     }
+
+    /// Read current counter values and then reset counters to zero.
+    /// Returns delta values accumulated since the last read/reset.
+    pub fn read_and_reset(&self) -> Result<HashMap<Vec<String>, Vec<Option<f64>>>> {
+        let results = self.read_results()?;
+        self.reset()?;
+        Ok(results)
+    }
+
+    /// Reset all group counters to zero.
+    pub fn reset(&self) -> Result<()> {
+        for g in &self.groups {
+            reset_group(g)?;
+        }
+        Ok(())
+    }
 }
 
 fn aggregate_values(dest: &mut [f64], valid: &mut [bool], src: &[Option<f64>]) {
@@ -398,6 +414,17 @@ fn disable_group(group: &PerfEventGroup) -> Result<()> {
     if ret < 0 {
         bail!(
             "ioctl PERF_EVENT_IOC_DISABLE failed: {}",
+            std::io::Error::last_os_error()
+        );
+    }
+    Ok(())
+}
+
+fn reset_group(group: &PerfEventGroup) -> Result<()> {
+    let ret = unsafe { libc::ioctl(group.leader_fd, PERF_EVENT_IOC_RESET as _, 0) };
+    if ret < 0 {
+        bail!(
+            "ioctl PERF_EVENT_IOC_RESET failed: {}",
             std::io::Error::last_os_error()
         );
     }
