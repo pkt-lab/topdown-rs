@@ -11,6 +11,26 @@ use anyhow::{bail, Context, Result};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+/// A single timestamped snapshot of event counter values.
+#[derive(Debug, Clone)]
+pub struct TimestampedSnapshot {
+    /// Seconds elapsed since capture start.
+    pub timestamp: f64,
+    /// Event counter values for this interval.
+    pub results: HashMap<Vec<String>, Vec<Option<f64>>>,
+}
+
+/// Result of a capture session — either a single aggregated result
+/// or a series of timestamped interval snapshots.
+#[derive(Debug)]
+pub enum CaptureResult {
+    /// Single aggregated result (non-interval mode).
+    Aggregated(HashMap<Vec<String>, Vec<Option<f64>>>),
+    /// Time-series of interval snapshots.
+    Intervals(Vec<TimestampedSnapshot>),
+}
 
 /// How to capture: run a command, attach to PIDs, or system-wide.
 #[derive(Debug)]
@@ -37,17 +57,17 @@ impl WorkloadMode {
     }
 }
 
-/// Run a capture session and return aggregated results.
+/// Run a capture session and return results.
 pub fn run_capture(
     mode: &WorkloadMode,
     event_groups: &[Vec<EventConfig>],
     cores: &[i32],
-    _interval: Option<u64>,
-) -> Result<HashMap<Vec<String>, Vec<Option<f64>>>> {
+    interval: Option<u64>,
+) -> Result<CaptureResult> {
     match mode {
-        WorkloadMode::Command(cmd) => run_command_capture(cmd, event_groups, cores),
-        WorkloadMode::Pid(pids) => run_pid_capture(pids, event_groups, cores),
-        WorkloadMode::SystemWide => run_systemwide_capture(event_groups, cores),
+        WorkloadMode::Command(cmd) => run_command_capture(cmd, event_groups, cores, interval),
+        WorkloadMode::Pid(pids) => run_pid_capture(pids, event_groups, cores, interval),
+        WorkloadMode::SystemWide => run_systemwide_capture(event_groups, cores, interval),
     }
 }
 
@@ -56,7 +76,8 @@ fn run_command_capture(
     command: &[String],
     event_groups: &[Vec<EventConfig>],
     cores: &[i32],
-) -> Result<HashMap<Vec<String>, Vec<Option<f64>>>> {
+    interval: Option<u64>,
+) -> Result<CaptureResult> {
     if command.is_empty() {
         bail!("Empty command");
     }
@@ -73,53 +94,142 @@ fn run_command_capture(
     // Enable counters
     collector.enable()?;
 
-    // Wait for child to complete
-    let status = child.wait().context("Failed to wait for child process")?;
+    if let Some(interval_ms) = interval {
+        // Interval mode: periodically read and reset counters
+        let interval_dur = Duration::from_millis(interval_ms);
+        let start = Instant::now();
+        let mut snapshots = Vec::new();
 
-    // Disable counters
-    collector.disable()?;
+        loop {
+            std::thread::sleep(interval_dur);
 
-    if !status.success() {
-        log::warn!("Command exited with status: {status}");
+            // Check if child has exited
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    // Child exited — do one final read
+                    let results = collector.read_results()?;
+                    let elapsed = start.elapsed().as_secs_f64();
+                    snapshots.push(TimestampedSnapshot {
+                        timestamp: elapsed,
+                        results,
+                    });
+                    collector.disable()?;
+                    if !status.success() {
+                        log::warn!("Command exited with status: {status}");
+                    }
+                    break;
+                }
+                Ok(None) => {
+                    // Still running — read and reset
+                    let results = collector.read_and_reset()?;
+                    let elapsed = start.elapsed().as_secs_f64();
+                    snapshots.push(TimestampedSnapshot {
+                        timestamp: elapsed,
+                        results,
+                    });
+                }
+                Err(e) => {
+                    collector.disable()?;
+                    return Err(e).context("Failed to check child status");
+                }
+            }
+        }
+
+        Ok(CaptureResult::Intervals(snapshots))
+    } else {
+        // Non-interval mode: wait for child to complete
+        let status = child.wait().context("Failed to wait for child process")?;
+        collector.disable()?;
+
+        if !status.success() {
+            log::warn!("Command exited with status: {status}");
+        }
+
+        Ok(CaptureResult::Aggregated(collector.read_results()?))
     }
-
-    collector.read_results()
 }
 
 /// Attach to existing PIDs and capture until they exit.
 fn run_pid_capture(
     pids: &[i32],
     event_groups: &[Vec<EventConfig>],
-    cores: &[i32],
-) -> Result<HashMap<Vec<String>, Vec<Option<f64>>>> {
-    // Verify PIDs exist
+    _cores: &[i32],
+    interval: Option<u64>,
+) -> Result<CaptureResult> {
+    // Open one PerfCollector per PID. Use core=-1 so the kernel follows
+    // each process across all cores automatically.
+    let pid_cores: &[i32] = &[-1];
+    let mut collectors: Vec<PerfCollector> = Vec::with_capacity(pids.len());
     for &pid in pids {
-        let proc_path = format!("/proc/{pid}");
-        if !std::path::Path::new(&proc_path).exists() {
-            bail!("PID {pid} does not exist");
-        }
+        let collector = PerfCollector::open(event_groups, pid_cores, Some(pid))
+            .with_context(|| format!("Failed to open perf events for PID {pid}"))?;
+        collectors.push(collector);
     }
 
-    // Open perf events targeting the first PID (or system-wide with core filter)
-    // For PID mode, we open per-pid events
-    let collector = PerfCollector::open(event_groups, cores, Some(pids[0]))?;
+    for c in &collectors {
+        c.enable()?;
+    }
 
-    // Enable counters
-    collector.enable()?;
+    if let Some(interval_ms) = interval {
+        let interval_dur = Duration::from_millis(interval_ms);
+        let start = Instant::now();
+        let mut snapshots = Vec::new();
+        let mut remaining: Vec<i32> = pids.to_vec();
 
-    // Wait for PIDs to exit using inotify on /proc/[pid]
-    wait_for_pids(pids)?;
+        while !remaining.is_empty() {
+            std::thread::sleep(interval_dur);
 
-    // Disable counters
-    collector.disable()?;
+            let mut merged = HashMap::new();
+            for c in &collectors {
+                merge_results(&mut merged, &c.read_and_reset()?);
+            }
+            snapshots.push(TimestampedSnapshot {
+                timestamp: start.elapsed().as_secs_f64(),
+                results: merged,
+            });
 
-    collector.read_results()
+            remaining.retain(|&pid| std::path::Path::new(&format!("/proc/{pid}")).exists());
+        }
+
+        for c in &collectors {
+            c.disable()?;
+        }
+        Ok(CaptureResult::Intervals(snapshots))
+    } else {
+        wait_for_pids(pids)?;
+        for c in &collectors {
+            c.disable()?;
+        }
+        let mut merged = HashMap::new();
+        for c in &collectors {
+            merge_results(&mut merged, &c.read_results()?);
+        }
+        Ok(CaptureResult::Aggregated(merged))
+    }
+}
+
+/// Merge per-PID results by summing values for matching event groups.
+fn merge_results(
+    dest: &mut HashMap<Vec<String>, Vec<Option<f64>>>,
+    src: &HashMap<Vec<String>, Vec<Option<f64>>>,
+) {
+    for (key, src_vals) in src {
+        let dest_vals = dest
+            .entry(key.clone())
+            .or_insert_with(|| vec![None; src_vals.len()]);
+        for (i, src_val) in src_vals.iter().enumerate() {
+            if let Some(sv) = src_val {
+                if i < dest_vals.len() {
+                    dest_vals[i] = Some(dest_vals[i].unwrap_or(0.0) + sv);
+                }
+            }
+        }
+    }
 }
 
 /// Wait for PIDs to exit by polling /proc/[pid].
 fn wait_for_pids(pids: &[i32]) -> Result<()> {
     use std::thread::sleep;
-    use std::time::Duration;
 
     let mut remaining: Vec<i32> = pids.to_vec();
 
@@ -137,7 +247,8 @@ fn wait_for_pids(pids: &[i32]) -> Result<()> {
 fn run_systemwide_capture(
     event_groups: &[Vec<EventConfig>],
     cores: &[i32],
-) -> Result<HashMap<Vec<String>, Vec<Option<f64>>>> {
+    interval: Option<u64>,
+) -> Result<CaptureResult> {
     let collector = PerfCollector::open(event_groups, cores, None)?;
 
     // Set up Ctrl+C handler
@@ -149,16 +260,38 @@ fn run_systemwide_capture(
 
     log::info!("System-wide capture running. Press Ctrl+C to stop.");
 
-    // Wait for Ctrl+C
-    while running.load(Ordering::SeqCst) {
-        std::thread::sleep(std::time::Duration::from_millis(100));
+    if let Some(interval_ms) = interval {
+        let interval_dur = Duration::from_millis(interval_ms);
+        let start = Instant::now();
+        let mut snapshots = Vec::new();
+
+        while running.load(Ordering::SeqCst) {
+            std::thread::sleep(interval_dur);
+            if !running.load(Ordering::SeqCst) {
+                break;
+            }
+
+            let results = collector.read_and_reset()?;
+            let elapsed = start.elapsed().as_secs_f64();
+            snapshots.push(TimestampedSnapshot {
+                timestamp: elapsed,
+                results,
+            });
+        }
+
+        collector.disable()?;
+        log::info!("Capture stopped.");
+        Ok(CaptureResult::Intervals(snapshots))
+    } else {
+        // Wait for Ctrl+C
+        while running.load(Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+
+        collector.disable()?;
+        log::info!("Capture stopped.");
+        Ok(CaptureResult::Aggregated(collector.read_results()?))
     }
-
-    collector.disable()?;
-
-    log::info!("Capture stopped.");
-
-    collector.read_results()
 }
 
 /// Install a Ctrl+C (SIGINT) handler that sets the flag to false.

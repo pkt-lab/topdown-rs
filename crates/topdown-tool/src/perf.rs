@@ -318,6 +318,30 @@ impl PerfCollector {
 
         Ok(results)
     }
+
+    /// Read counter values and immediately reset each group.
+    /// Minimizes the gap between read and reset to reduce lost events.
+    pub fn read_and_reset(&self) -> Result<HashMap<Vec<String>, Vec<Option<f64>>>> {
+        let mut results = HashMap::new();
+
+        for (eg_idx, names) in self.event_names.iter().enumerate() {
+            let n = names.len();
+            let mut aggregated = vec![0.0f64; n];
+            let mut valid = vec![true; n];
+
+            for core_idx in 0..self.cores_count {
+                let pg = &self.groups[eg_idx * self.cores_count + core_idx];
+                let values = read_group_values(pg)?;
+                // Reset immediately after reading this group to minimize lost events
+                reset_group(pg)?;
+                aggregate_values(&mut aggregated, &mut valid, &values);
+            }
+
+            results.insert(names.clone(), finalize_values(&aggregated, &valid));
+        }
+
+        Ok(results)
+    }
 }
 
 fn aggregate_values(dest: &mut [f64], valid: &mut [bool], src: &[Option<f64>]) {
@@ -398,6 +422,17 @@ fn disable_group(group: &PerfEventGroup) -> Result<()> {
     if ret < 0 {
         bail!(
             "ioctl PERF_EVENT_IOC_DISABLE failed: {}",
+            std::io::Error::last_os_error()
+        );
+    }
+    Ok(())
+}
+
+fn reset_group(group: &PerfEventGroup) -> Result<()> {
+    let ret = unsafe { libc::ioctl(group.leader_fd, PERF_EVENT_IOC_RESET as _, 0) };
+    if ret < 0 {
+        bail!(
+            "ioctl PERF_EVENT_IOC_RESET failed: {}",
             std::io::Error::last_os_error()
         );
     }

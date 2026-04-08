@@ -173,6 +173,8 @@ fn main() -> Result<()> {
     );
 
     let mut all_results = std::collections::HashMap::new();
+    let mut all_interval_snapshots: Vec<workload::TimestampedSnapshot> = Vec::new();
+    let is_interval = cli.interval.is_some();
 
     for (round_idx, chunk) in chunks.iter().enumerate() {
         log::info!("Round {}/{}", round_idx + 1, chunks.len());
@@ -193,25 +195,64 @@ fn main() -> Result<()> {
             })
             .collect();
 
-        let results = workload::run_capture(
+        let capture_result = workload::run_capture(
             &workload_mode,
             &event_configs,
             &cores,
             cli.interval,
         )?;
 
-        // Merge results
-        for (group_key, values) in results {
-            all_results.insert(group_key, values);
+        match capture_result {
+            workload::CaptureResult::Aggregated(results) => {
+                for (group_key, values) in results {
+                    all_results.insert(group_key, values);
+                }
+            }
+            workload::CaptureResult::Intervals(snapshots) => {
+                if all_interval_snapshots.is_empty() {
+                    all_interval_snapshots = snapshots;
+                } else {
+                    // Merge interval snapshots: add event results from this round
+                    // into the existing snapshots (aligning by index).
+                    for (i, snapshot) in snapshots.into_iter().enumerate() {
+                        if i < all_interval_snapshots.len() {
+                            for (key, values) in snapshot.results {
+                                all_interval_snapshots[i].results.insert(key, values);
+                            }
+                        } else {
+                            all_interval_snapshots.push(snapshot);
+                        }
+                    }
+                }
+            }
         }
     }
 
-    // Compute metrics
-    if cli.dump_events {
-        output::dump_events(&all_results, &db, cli.csv_output.as_deref())?;
+    // Compute and render metrics
+    if is_interval {
+        if cli.dump_events {
+            output::dump_interval_events(
+                &all_interval_snapshots,
+                cli.csv_output.as_deref(),
+            )?;
+        } else {
+            let computed = cpu::compute_metrics_per_timestamp(
+                &db,
+                &capture_groups,
+                &all_interval_snapshots,
+            )?;
+            output::render_interval_metrics(
+                &computed,
+                cli.csv_output.as_deref(),
+            )?;
+        }
     } else {
-        let computed = cpu::compute_metrics(&db, &capture_groups, &all_results)?;
-        output::render_metrics(&computed, &db, cli.csv_output.as_deref(), cli.descriptions)?;
+        if cli.dump_events {
+            output::dump_events(&all_results, &db, cli.csv_output.as_deref())?;
+        } else {
+            let computed = cpu::compute_metrics(&db, &capture_groups, &all_results)?;
+            output::render_metrics(&computed, &db, cli.csv_output.as_deref(), cli.descriptions)?;
+        }
     }
 
     Ok(())
